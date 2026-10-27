@@ -427,7 +427,9 @@ async fn update_task(State(home): Shared, Path(id): Path<i64>, Json(p): Json<Pat
                 tags: p.tags,
                 human: p.human,
             },
+            None,
         )
+        .map(store::Updated::into_task)
     })
     .await
 }
