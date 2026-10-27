@@ -1,10 +1,11 @@
 //! The board as MCP tools: over stdio for `kanzo mcp`, and over HTTP at `/mcp` of the board.
 //! Replies are short plain text to save agents' tokens.
 
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -18,7 +19,7 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::home::Home;
-use crate::store::{self, Error, Project, Store, Task, TaskPatch, short_time};
+use crate::store::{self, Error, Project, Store, Task, TaskPatch, Updated, short_time};
 
 /// The most done tasks list_tasks shows, newest first: an old board has thousands.
 const DONE_LISTED: usize = 20;
@@ -35,7 +36,8 @@ add_comment with what you did, then update_task to review. Leave tasks marked hu
 pub async fn serve(home: Home) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let repos = git_repos(&cwd);
-    let server = Kanzo { ctx: Arc::new(Ctx { home, cwd: Some(cwd), repos }), tool_router: Kanzo::tools() };
+    let ctx = Arc::new(Ctx { home, cwd: Some(cwd), repos });
+    let server = Kanzo { ctx, tool_router: Kanzo::tools(), seen: Seen::default() };
     let service = server.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     Ok(())
@@ -49,8 +51,11 @@ pub fn http_service(home: Home, shutdown: CancellationToken) -> StreamableHttpSe
     let config = StreamableHttpServerConfig::default().disable_allowed_hosts().with_cancellation_token(shutdown);
     // rmcp makes a server per session, and for some requests; the tool list is built once.
     let tool_router = Kanzo::tools();
+    // ponytail: rmcp calls this once per session for clients on MCP before 2026-07-28, so
+    // `seen` lasts the session. From 2026-07-28 on it serves each request on its own server,
+    // `seen` starts empty, and update_task overwrites as it did before conflict copies.
     StreamableHttpService::new(
-        move || Ok(Kanzo { ctx: ctx.clone(), tool_router: tool_router.clone() }),
+        move || Ok(Kanzo { ctx: ctx.clone(), tool_router: tool_router.clone(), seen: Seen::default() }),
         Default::default(),
         config,
     )
@@ -127,6 +132,29 @@ fn git_repos(dir: &std::path::Path) -> Vec<String> {
 pub struct Kanzo {
     ctx: Arc<Ctx>,
     tool_router: ToolRouter<Self>,
+    seen: Seen,
+}
+
+/// The last version of each task this session showed its agent, so update_task can tell
+/// when the agent edits over a change it hasn't read.
+#[derive(Clone, Default)]
+struct Seen(Arc<Mutex<HashMap<i64, Task>>>);
+
+impl Seen {
+    fn saw(&self, t: &Task) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).insert(t.id, t.clone());
+    }
+
+    /// `saw`, for a task shown as one line, without its description: that stays as last shown.
+    fn saw_line(&self, t: &Task) {
+        let mut seen = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let description = seen.get(&t.id).map_or_else(|| t.description.clone(), |old| old.description.clone());
+        seen.insert(t.id, Task { description, ..t.clone() });
+    }
+
+    fn get(&self, id: i64) -> Option<Task> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned()
+    }
 }
 
 /// A task, as `api#12` or just `12`. Agents are told it is a string, which keeps the
@@ -320,6 +348,7 @@ impl Kanzo {
 
     #[tool(description = "List tasks in board order.")]
     async fn list_tasks(&self, Parameters(args): Parameters<ListTasksArgs>) -> Result<CallToolResult, ErrorData> {
+        let seen = self.seen.clone();
         Ok(self
             .run(move |ctx, store| {
                 let all = args.project.as_deref().is_some_and(|p| p.trim().eq_ignore_ascii_case("all"));
@@ -348,6 +377,7 @@ impl Kanzo {
                     if t.human {
                         people += 1;
                     } else {
+                        seen.saw_line(t);
                         task_line(&mut out, t);
                         out.push('\n');
                     }
@@ -373,9 +403,11 @@ impl Kanzo {
 
     #[tool(description = "Show a task with its comments and image paths.")]
     async fn get_task(&self, Parameters(args): Parameters<TaskArgs>) -> Result<CallToolResult, ErrorData> {
+        let seen = self.seen.clone();
         Ok(self
             .run(move |ctx, store| {
                 let task = args.id.find(store)?;
+                seen.saw(&task);
                 task_detail(ctx, store, &task)
             })
             .await)
@@ -383,35 +415,48 @@ impl Kanzo {
 
     #[tool(description = "Add a task to todo.")]
     async fn create_task(&self, Parameters(args): Parameters<CreateTaskArgs>) -> Result<CallToolResult, ErrorData> {
+        let seen = self.seen.clone();
         Ok(self
             .run(move |ctx, store| {
                 let project = ctx.project(store, args.project.as_deref())?;
                 let mut t = store.create_task(project.id, &args.title, args.description.as_deref().unwrap_or(""))?;
                 if args.tags.is_some() {
-                    t = store.update_task(t.id, TaskPatch { tags: args.tags, ..Default::default() })?;
+                    t = store.update_task(t.id, TaskPatch { tags: args.tags, ..Default::default() }, None)?.into_task();
                 }
+                seen.saw(&t);
                 Ok(format!("Created {} in {}: {}", t.key(), t.status, t.title))
             })
             .await)
     }
 
-    #[tool(description = "Change the fields you pass.")]
+    #[tool(description = "Change the fields you pass; an edit over a change you haven't read goes to a copy.")]
     async fn update_task(&self, Parameters(args): Parameters<UpdateTaskArgs>) -> Result<CallToolResult, ErrorData> {
+        let seen = self.seen.clone();
         Ok(self
             .run(move |_, store| {
                 let before = args.id.find(store)?;
                 let status = args.status.map(|s| s.trim().to_ascii_lowercase());
-                let after = store.update_task(
-                    before.id,
-                    TaskPatch {
-                        title: args.title,
-                        description: args.description,
-                        status,
-                        tags: args.tags,
-                        project_id: None,
-                        human: None,
-                    },
-                )?;
+                let patch = TaskPatch {
+                    title: args.title,
+                    description: args.description,
+                    status,
+                    tags: args.tags,
+                    project_id: None,
+                    human: None,
+                };
+                let after = match store.update_task(before.id, patch, seen.get(before.id).as_ref())? {
+                    Updated::Applied(after) => after,
+                    Updated::Copied { original, copy, fields } => {
+                        seen.saw(&copy);
+                        let (key, copy_key) = (original.key(), copy.key());
+                        return Ok(format!(
+                            "Conflict: {} of {key} changed since you last read it. Your edit was saved as a new task \
+                             {copy_key} (tagged conflict); {key} is unchanged. Compare them and merge by hand.",
+                            fields.join(", ")
+                        ));
+                    }
+                };
+                seen.saw(&after);
                 let moved = if before.status != after.status {
                     format!(", {} -> {}", before.status, after.status)
                 } else {
@@ -441,12 +486,16 @@ impl Kanzo {
 
     #[tool(description = "Take the top todo task, move it to doing and show it.")]
     async fn next_task(&self, Parameters(args): Parameters<NextTaskArgs>) -> Result<CallToolResult, ErrorData> {
+        let seen = self.seen.clone();
         Ok(self
             .run(move |ctx, store| {
                 let all = args.project.as_deref().is_some_and(|p| p.trim().eq_ignore_ascii_case("all"));
                 let project = if all { None } else { Some(ctx.project(store, args.project.as_deref())?) };
                 match store.next_task(project.as_ref().map(|p| p.id))? {
-                    Some(task) => Ok(format!("Moved to {}:\n{}", task.status, task_detail(ctx, store, &task)?)),
+                    Some(task) => {
+                        seen.saw(&task);
+                        Ok(format!("Moved to {}:\n{}", task.status, task_detail(ctx, store, &task)?))
+                    }
                     None => {
                         let scope = project.map_or("any project".into(), |p| p.slug);
                         Ok(format!("Nothing in {} for {scope}.", store.statuses()[0]))

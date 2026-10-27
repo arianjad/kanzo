@@ -162,6 +162,27 @@ pub struct TaskPatch {
     pub human: Option<bool>,
 }
 
+/// What `Store::update_task` did with a patch.
+#[derive(Debug)]
+pub enum Updated {
+    Applied(Task),
+    /// `fields` of `original` changed since the caller read it, so the patch went to `copy`.
+    Copied {
+        original: Task,
+        copy: Task,
+        fields: Vec<&'static str>,
+    },
+}
+
+impl Updated {
+    /// The task that got the patch.
+    pub fn into_task(self) -> Task {
+        match self {
+            Updated::Applied(t) | Updated::Copied { copy: t, .. } => t,
+        }
+    }
+}
+
 pub struct Store {
     conn: Connection,
     statuses: Vec<String>,
@@ -584,55 +605,131 @@ impl Store {
         self.get_task(id)
     }
 
-    pub fn update_task(&self, id: i64, patch: TaskPatch) -> Result<Task> {
+    /// Changes the fields `patch` has. With `seen`, the task as the caller last read it, a
+    /// patched field changed since then to another value is a conflict: the task stays as it
+    /// is, and the patch goes to a copy of it tagged `conflict`, with a comment on each.
+    pub fn update_task(&self, id: i64, patch: TaskPatch, seen: Option<&Task>) -> Result<Updated> {
         let title = patch.title.as_deref().map(clean_title).transpose()?;
         if let Some(s) = &patch.status {
             self.check_status(s)?;
         }
         self.write(|c| {
             let current = self.get_task(id)?;
-            if let Some(title) = title {
+            let fields = match seen.filter(|s| s.id == id) {
+                Some(seen) => Self::conflicts(c, &current, seen, &patch, title.as_deref())?,
+                None => Vec::new(),
+            };
+            if fields.is_empty() {
+                Self::apply(c, id, &current.status, &patch, title.as_deref())?;
+                return Ok(Updated::Applied(self.get_task(id)?));
+            }
+            let position = Self::end_of_column(c, &current.status, 0)?;
+            c.execute(
+                "INSERT INTO tasks (project_id, title, description, tags, human, status, position)
+                 SELECT project_id, title, description, tags, human, status, ?2 FROM tasks WHERE id = ?1",
+                params![id, position],
+            )?;
+            let copy = c.last_insert_rowid();
+            Self::apply(c, copy, &current.status, &patch, title.as_deref())?;
+            let tags = self.get_task(copy)?.tags.join(",");
+            c.execute(
+                "UPDATE tasks SET tags = ?1 WHERE id = ?2",
+                params![clean_tags(&format!("{tags},conflict")).join(","), copy],
+            )?;
+            let (key, copy_key) = (current.key(), format!("{}#{copy}", current.project));
+            let what = fields.join(", ");
+            for (task, body) in [
+                (
+                    id,
+                    format!("An edit to {what} conflicted with a change made here since; it was saved as {copy_key}."),
+                ),
+                (copy, format!("Copy of {key}, made because this edit conflicted with a change to {what} there.")),
+            ] {
                 c.execute(
-                    &format!("UPDATE tasks SET title = ?1, updated_at = {NOW} WHERE id = ?2"),
-                    params![title, id],
+                    "INSERT INTO comments (task_id, author, body) VALUES (?1, 'kanzo', ?2)",
+                    params![task, body],
                 )?;
             }
-            if let Some(p) = patch.project_id {
-                c.execute(
-                    &format!("UPDATE tasks SET project_id = ?1, updated_at = {NOW} WHERE id = ?2 AND project_id <> ?1"),
-                    params![p, id],
-                )?;
-            }
-            if let Some(human) = patch.human {
-                c.execute(
-                    &format!("UPDATE tasks SET human = ?1, updated_at = {NOW} WHERE id = ?2 AND human <> ?1"),
-                    params![human, id],
-                )?;
-            }
-            if let Some(t) = &patch.tags {
-                c.execute(
-                    &format!("UPDATE tasks SET tags = ?1, updated_at = {NOW} WHERE id = ?2"),
-                    params![clean_tags(t).join(","), id],
-                )?;
-            }
-            if let Some(d) = &patch.description {
-                c.execute(
-                    &format!("UPDATE tasks SET description = ?1, updated_at = {NOW} WHERE id = ?2"),
-                    params![d.trim(), id],
-                )?;
-            }
-            if let Some(s) = &patch.status
-                && *s != current.status
-            {
-                let position = Self::end_of_column(c, s, id)?;
-                c.execute(
-                    &format!("UPDATE tasks SET status = ?1, position = ?2, updated_at = {NOW} WHERE id = ?3"),
-                    params![s, position, id],
-                )?;
-            }
-            Ok(())
-        })?;
-        self.get_task(id)
+            Ok(Updated::Copied { original: self.get_task(id)?, copy: self.get_task(copy)?, fields })
+        })
+    }
+
+    /// The patched fields of `current` that changed since `seen` to a value other than the patch's.
+    fn conflicts(
+        c: &Connection,
+        current: &Task,
+        seen: &Task,
+        patch: &TaskPatch,
+        title: Option<&str>,
+    ) -> Result<Vec<&'static str>> {
+        fn clash<T: PartialEq + ?Sized>(seen: &T, current: &T, new: &T) -> bool {
+            current != seen && current != new
+        }
+        let slug: Option<String> = match patch.project_id {
+            Some(p) => c.query_row("SELECT slug FROM projects WHERE id = ?1", [p], |r| r.get(0)).optional()?,
+            None => None,
+        };
+        let tags = patch.tags.as_deref().map(clean_tags);
+        let found = [
+            ("title", title.is_some_and(|t| clash(seen.title.as_str(), &current.title, t))),
+            (
+                "description",
+                patch
+                    .description
+                    .as_deref()
+                    .is_some_and(|d| clash(seen.description.as_str(), &current.description, d.trim())),
+            ),
+            ("status", patch.status.as_ref().is_some_and(|s| clash(&seen.status, &current.status, s))),
+            ("tags", tags.is_some_and(|t| clash(&seen.tags, &current.tags, &t))),
+            (
+                "project",
+                patch.project_id.is_some()
+                    && clash(seen.project.as_str(), &current.project, slug.as_deref().unwrap_or("")),
+            ),
+            ("human", patch.human.is_some_and(|h| clash(&seen.human, &current.human, &h))),
+        ];
+        Ok(found.into_iter().filter(|(_, clashes)| *clashes).map(|(name, _)| name).collect())
+    }
+
+    /// Writes `patch` to task `id`, whose status is now `status`.
+    fn apply(c: &Connection, id: i64, status: &str, patch: &TaskPatch, title: Option<&str>) -> Result<()> {
+        if let Some(title) = title {
+            c.execute(&format!("UPDATE tasks SET title = ?1, updated_at = {NOW} WHERE id = ?2"), params![title, id])?;
+        }
+        if let Some(p) = patch.project_id {
+            c.execute(
+                &format!("UPDATE tasks SET project_id = ?1, updated_at = {NOW} WHERE id = ?2 AND project_id <> ?1"),
+                params![p, id],
+            )?;
+        }
+        if let Some(human) = patch.human {
+            c.execute(
+                &format!("UPDATE tasks SET human = ?1, updated_at = {NOW} WHERE id = ?2 AND human <> ?1"),
+                params![human, id],
+            )?;
+        }
+        if let Some(t) = &patch.tags {
+            c.execute(
+                &format!("UPDATE tasks SET tags = ?1, updated_at = {NOW} WHERE id = ?2"),
+                params![clean_tags(t).join(","), id],
+            )?;
+        }
+        if let Some(d) = &patch.description {
+            c.execute(
+                &format!("UPDATE tasks SET description = ?1, updated_at = {NOW} WHERE id = ?2"),
+                params![d.trim(), id],
+            )?;
+        }
+        if let Some(s) = &patch.status
+            && s != status
+        {
+            let position = Self::end_of_column(c, s, id)?;
+            c.execute(
+                &format!("UPDATE tasks SET status = ?1, position = ?2, updated_at = {NOW} WHERE id = ?3"),
+                params![s, position, id],
+            )?;
+        }
+        Ok(())
     }
 
     /// Moves a task to `status`, just above task `before`, or to the bottom when `before` is `None`.
@@ -1077,9 +1174,11 @@ mod tests {
         let web = s.create_project("web", "", None).unwrap();
         let login = s.create_task(api.id, "Fix login", "Users loop on /login").unwrap();
         let old = s.create_task(web.id, "Login page copy", "").unwrap();
-        s.update_task(old.id, TaskPatch { status: Some("done".into()), ..Default::default() }).unwrap();
+        s.update_task(old.id, TaskPatch { status: Some("done".into()), ..Default::default() }, None)
+            .unwrap()
+            .into_task();
         let other = s.create_task(web.id, "Pricing 100%", "").unwrap();
-        s.update_task(other.id, TaskPatch { tags: Some("ui".into()), ..Default::default() }).unwrap();
+        s.update_task(other.id, TaskPatch { tags: Some("ui".into()), ..Default::default() }, None).unwrap().into_task();
         let titles = |q: &str| s.search(q, 10).unwrap().into_iter().map(|t| t.title).collect::<Vec<_>>();
         assert_eq!(titles("LOGIN"), ["Fix login", "Login page copy"], "any project, open first, done too");
         assert_eq!(titles("login api"), ["Fix login"], "every word must match, the project too");
@@ -1159,15 +1258,21 @@ mod tests {
             .update_task(
                 t.id,
                 TaskPatch { status: Some("review".into()), title: Some("Fix login bug".into()), ..Default::default() },
+                None,
             )
-            .unwrap();
+            .unwrap()
+            .into_task();
         assert_eq!((t.title.as_str(), t.status.as_str()), ("Fix login bug", "review"));
-        assert!(s.update_task(t.id, TaskPatch { status: Some("nope".into()), ..Default::default() }).is_err());
-        assert!(s.update_task(t.id, TaskPatch { title: Some("  ".into()), ..Default::default() }).is_err());
+        assert!(s.update_task(t.id, TaskPatch { status: Some("nope".into()), ..Default::default() }, None).is_err());
+        assert!(s.update_task(t.id, TaskPatch { title: Some("  ".into()), ..Default::default() }, None).is_err());
         let web = s.create_project("web", "", None).unwrap();
-        let moved = s.update_task(t.id, TaskPatch { project_id: Some(web.id), ..Default::default() }).unwrap();
+        let moved = s
+            .update_task(t.id, TaskPatch { project_id: Some(web.id), ..Default::default() }, None)
+            .unwrap()
+            .into_task();
         assert_eq!((moved.key(), moved.status.as_str()), (format!("web#{}", t.id), "review"));
-        let t = s.update_task(t.id, TaskPatch { project_id: Some(p.id), ..Default::default() }).unwrap();
+        let t =
+            s.update_task(t.id, TaskPatch { project_id: Some(p.id), ..Default::default() }, None).unwrap().into_task();
 
         s.add_comment(t.id, "claude-code", "Done, see PR", &[]).unwrap();
         s.add_comment(t.id, "", "thanks", &[]).unwrap();
@@ -1175,11 +1280,18 @@ mod tests {
         assert_eq!(comments.iter().map(|c| c.author.as_str()).collect::<Vec<_>>(), ["claude-code", "me"]);
         assert!(s.add_comment(t.id, "me", " ", &[]).is_err());
         assert_eq!(s.get_task(t.id).unwrap().comments, 2);
-        let tagged =
-            s.update_task(t.id, TaskPatch { tags: Some(" Bug, UI,bug ,, needs  review".into()), ..Default::default() });
-        assert_eq!(tagged.unwrap().tags, ["bug", "ui", "needs review"]);
+        let tagged = s.update_task(
+            t.id,
+            TaskPatch { tags: Some(" Bug, UI,bug ,, needs  review".into()), ..Default::default() },
+            None,
+        );
+        assert_eq!(tagged.unwrap().into_task().tags, ["bug", "ui", "needs review"]);
         assert!(
-            s.update_task(t.id, TaskPatch { tags: Some(" , ".into()), ..Default::default() }).unwrap().tags.is_empty()
+            s.update_task(t.id, TaskPatch { tags: Some(" , ".into()), ..Default::default() }, None)
+                .unwrap()
+                .into_task()
+                .tags
+                .is_empty()
         );
         let gone = s.add_comment(t.id, "me", "typo", &[]).unwrap();
         assert_eq!(s.delete_comment(gone.id).unwrap().body, "typo");
@@ -1245,6 +1357,67 @@ mod tests {
         assert!(s.move_task(a.id, "nope", None).is_err());
     }
 
+    fn describe(d: &str) -> TaskPatch {
+        TaskPatch { description: Some(d.into()), ..Default::default() }
+    }
+
+    #[test]
+    fn an_edit_over_an_unread_change_goes_to_a_copy() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(p.id, "Fix login", "old").unwrap();
+        s.update_task(t.id, TaskPatch { tags: Some("bug".into()), ..Default::default() }, None).unwrap();
+        // B reads the task, then A changes its description.
+        let read_by_b = s.get_task(t.id).unwrap();
+        s.update_task(t.id, describe("by A"), None).unwrap();
+        let by_b = TaskPatch { title: Some("Fix login loop".into()), ..describe("by B") };
+        let Updated::Copied { original, copy, fields } = s.update_task(t.id, by_b, Some(&read_by_b)).unwrap() else {
+            panic!("B's edit should go to a copy");
+        };
+        assert_eq!(fields, ["description"]);
+        let unchanged = s.get_task(t.id).unwrap();
+        assert_eq!((unchanged.title.as_str(), unchanged.description.as_str()), ("Fix login", "by A"));
+        assert_eq!(original.id, t.id);
+        // The copy has the whole patch, on top of the task as it is now.
+        assert_eq!((copy.title.as_str(), copy.description.as_str()), ("Fix login loop", "by B"));
+        assert_eq!(
+            (copy.project.as_str(), copy.status.as_str(), copy.tags.as_slice()),
+            ("api", "todo", ["bug", "conflict"].map(String::from).as_slice())
+        );
+        let said = |id| s.list_comments(id).unwrap().into_iter().map(|c| (c.author, c.body)).collect::<Vec<_>>();
+        let (on_original, on_copy) = (said(t.id), said(copy.id));
+        assert_eq!((on_original.len(), on_copy.len()), (1, 1));
+        assert!(
+            on_original[0].0 == "kanzo"
+                && on_original[0].1.contains(&copy.key())
+                && on_original[0].1.contains("description")
+        );
+        assert!(on_copy[0].0 == "kanzo" && on_copy[0].1.contains(&t.key()));
+    }
+
+    #[test]
+    fn edits_that_overwrite_nothing_unread_apply() {
+        let (_dir, s) = store();
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(p.id, "Fix login", "old").unwrap();
+        let applied = |u: Updated| match u {
+            Updated::Applied(t) => t,
+            Updated::Copied { .. } => panic!("expected the edit to apply"),
+        };
+        // A moves it to doing; B, who read it before, edits the description.
+        let read = s.get_task(t.id).unwrap();
+        s.update_task(t.id, TaskPatch { status: Some("doing".into()), ..Default::default() }, None).unwrap();
+        let after = applied(s.update_task(t.id, describe("by B"), Some(&read)).unwrap());
+        assert_eq!((after.status.as_str(), after.description.as_str()), ("doing", "by B"));
+        // B writes the value A already wrote.
+        let read = s.get_task(t.id).unwrap();
+        s.update_task(t.id, describe("same"), None).unwrap();
+        assert_eq!(applied(s.update_task(t.id, describe("same"), Some(&read)).unwrap()).description, "same");
+        // Without `seen`, edits overwrite as they always did.
+        assert_eq!(applied(s.update_task(t.id, describe("blind"), None).unwrap()).description, "blind");
+        assert_eq!(s.list_tasks(None, None).unwrap().len(), 1, "no copies");
+    }
+
     #[test]
     fn next_task_takes_top_todo() {
         let (_dir, s) = store();
@@ -1253,7 +1426,12 @@ mod tests {
         s.create_task(web.id, "web first", "").unwrap();
         // At the top of api's todo, but for a person: agents never get it.
         let human = s.create_task(api.id, "Call the bank", "").unwrap();
-        assert!(s.update_task(human.id, TaskPatch { human: Some(true), ..Default::default() }).unwrap().human);
+        assert!(
+            s.update_task(human.id, TaskPatch { human: Some(true), ..Default::default() }, None)
+                .unwrap()
+                .into_task()
+                .human
+        );
         s.create_task(api.id, "api first", "").unwrap();
         s.create_task(api.id, "api second", "").unwrap();
 
