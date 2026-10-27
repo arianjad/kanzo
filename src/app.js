@@ -811,6 +811,7 @@ function renderProjectPick(task) {
     ...projects.map((slug) => el("option", { value: slug }, slug)));
   select.value = task.project;
   select.addEventListener("focus", () => startEdit("project"));
+  select.addEventListener("blur", () => delete editing.project);
   select.addEventListener("change", () => {
     try { localStorage.setItem("kanzo.newTaskProject", select.value); } catch {}
     patchTask({ project: select.value });
@@ -826,8 +827,8 @@ function fit(t) {
   t.style.height = t.scrollHeight + "px";
 }
 
-// What each field showed when the person started editing it: the panel refreshes
-// underneath a field being typed in, so `panelTask` may already hold a newer value.
+// What each focused field shows: the panel refreshes everything but a focused field, so
+// `panelTask` may already hold a newer value. Unfocused fields show `panelTask`.
 let editing = {};
 const startEdit = (field) => { if (panelTask) editing[field] = panelTask[field]; };
 const seen = (field) => (field in editing ? editing[field] : panelTask[field]);
@@ -835,11 +836,14 @@ const seen = (field) => (field in editing ? editing[field] : panelTask[field]);
 // Sent with what the person saw, an edit over a change made meanwhile goes to a copy.
 async function patchTask(fields) {
   if (!panelTask) return;
-  if (fresh === panelTask.id) fresh = null;
+  const id = panelTask.id;
+  if (fresh === id) fresh = null;
   const base = {};
-  for (const f of Object.keys(fields)) { base[f] = seen(f); delete editing[f]; }
+  for (const f of Object.keys(fields)) base[f] = seen(f);
   try {
-    const r = await api("PATCH", `/tasks/${panelTask.id}`, { ...fields, base });
+    const r = await api("PATCH", `/tasks/${id}`, { ...fields, base });
+    // A field still (or again) focused now shows the person's own saved value.
+    if (state.task === id) for (const f of Object.keys(fields)) if (f in editing) editing[f] = (r.copy || r)[f];
     if (r.copy) {
       const open = el("a", { href: "#", style: "color:inherit;text-decoration:underline",
                              onclick: (e) => { e.preventDefault(); openTask(r.copy.id); } }, key(r.copy));
@@ -886,9 +890,6 @@ $("#p-desc").addEventListener("blur", (e) => {
   if (e.target.value.trim() !== seen("description")) patchTask({ description: e.target.value });
   else { e.target.value = panelTask.description; fit(e.target); }
 });
-$("#p-title").addEventListener("focus", () => startEdit("title"));
-$("#p-desc").addEventListener("focus", () => startEdit("description"));
-$("#p-tags").addEventListener("focus", () => startEdit("tags"));
 
 $("#p-status").addEventListener("change", (e) => patchTask({ status: e.target.value }));
 $("#p-human").addEventListener("change", (e) => patchTask({ human: e.target.checked }));
@@ -978,6 +979,11 @@ $("#p-tags").addEventListener("blur", (e) => {
   if (tags.join(",") !== seen("tags").join(",")) patchTask({ tags: tags.join(", ") });
   else e.target.value = panelTask.tags.join(", ");
 });
+// After the save-on-blur handlers above, so they still read the base.
+for (const [field, f] of [[$("#p-title"), "title"], [$("#p-desc"), "description"], [$("#p-tags"), "tags"]]) {
+  field.addEventListener("focus", () => startEdit(f));
+  field.addEventListener("blur", () => delete editing[f]);
+}
 
 $("#p-comment-form").addEventListener("submit", async (e) => {
   e.preventDefault();
