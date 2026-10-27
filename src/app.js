@@ -101,12 +101,12 @@ async function copyKey(text) {
   toast(`Copied ${text}`);
 }
 
-function toast(message) {
+function toast(message, ms = 3500) {
   document.querySelector(".toast")?.remove();
   const t = el("div", { class: "toast" }, message);
   document.body.append(t);
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.remove(), 3500);
+  toastTimer = setTimeout(() => t.remove(), ms);
 }
 
 // The colours a project can be given; the names match PROJECT_COLORS in store.rs.
@@ -717,6 +717,7 @@ async function openTask(id) {
   leavePanelField();
   if (fresh !== id) dropFresh();
   state.task = id;
+  editing = {};
   document.querySelectorAll(".card.open").forEach((c) => c.classList.remove("open"));
   document.querySelector(`.card[data-id="${id}"]`)?.classList.add("open");
   $("#p-comment").value = "";
@@ -809,6 +810,7 @@ function renderProjectPick(task) {
   const select = el("select", { title: "Project", "aria-label": "Project" },
     ...projects.map((slug) => el("option", { value: slug }, slug)));
   select.value = task.project;
+  select.addEventListener("focus", () => startEdit("project"));
   select.addEventListener("change", () => {
     try { localStorage.setItem("kanzo.newTaskProject", select.value); } catch {}
     patchTask({ project: select.value });
@@ -824,11 +826,25 @@ function fit(t) {
   t.style.height = t.scrollHeight + "px";
 }
 
+// What each field showed when the person started editing it: the panel refreshes
+// underneath a field being typed in, so `panelTask` may already hold a newer value.
+let editing = {};
+const startEdit = (field) => { if (panelTask) editing[field] = panelTask[field]; };
+const seen = (field) => (field in editing ? editing[field] : panelTask[field]);
+
+// Sent with what the person saw, an edit over a change made meanwhile goes to a copy.
 async function patchTask(fields) {
   if (!panelTask) return;
   if (fresh === panelTask.id) fresh = null;
+  const base = {};
+  for (const f of Object.keys(fields)) { base[f] = seen(f); delete editing[f]; }
   try {
-    await api("PATCH", `/tasks/${panelTask.id}`, fields);
+    const r = await api("PATCH", `/tasks/${panelTask.id}`, { ...fields, base });
+    if (r.copy) {
+      const open = el("a", { href: "#", style: "color:inherit;text-decoration:underline",
+                             onclick: (e) => { e.preventDefault(); openTask(r.copy.id); } }, key(r.copy));
+      toast([`Someone changed the ${r.fields.join(" and ")} while you were editing. Your edit was saved as `, open, "."], 10000);
+    }
     await refreshTask();
     loadBoard();
   } catch (e) { toast(e.message); refreshTask(); }
@@ -857,7 +873,7 @@ $("#p-title").addEventListener("keydown", (e) => {
 $("#p-title").addEventListener("blur", (e) => {
   if (!panelTask) return;
   const v = e.target.value.trim();
-  if (v && v !== panelTask.title) patchTask({ title: v });
+  if (v && v !== seen("title")) patchTask({ title: v });
   else { e.target.value = panelTask.title; fit(e.target); }
 });
 
@@ -866,8 +882,13 @@ $("#p-desc").addEventListener("keydown", (e) => {
   else if (e.key === "Escape") cancelField(e, panelTask ? panelTask.description : "");
 });
 $("#p-desc").addEventListener("blur", (e) => {
-  if (panelTask && e.target.value.trim() !== panelTask.description) patchTask({ description: e.target.value });
+  if (!panelTask) return;
+  if (e.target.value.trim() !== seen("description")) patchTask({ description: e.target.value });
+  else { e.target.value = panelTask.description; fit(e.target); }
 });
+$("#p-title").addEventListener("focus", () => startEdit("title"));
+$("#p-desc").addEventListener("focus", () => startEdit("description"));
+$("#p-tags").addEventListener("focus", () => startEdit("tags"));
 
 $("#p-status").addEventListener("change", (e) => patchTask({ status: e.target.value }));
 $("#p-human").addEventListener("change", (e) => patchTask({ human: e.target.checked }));
@@ -954,7 +975,7 @@ $("#p-tags").addEventListener("keydown", (e) => {
 $("#p-tags").addEventListener("blur", (e) => {
   if (!panelTask) return;
   const tags = cleanTags(e.target.value);
-  if (tags.join(",") !== panelTask.tags.join(",")) patchTask({ tags: tags.join(", ") });
+  if (tags.join(",") !== seen("tags").join(",")) patchTask({ tags: tags.join(", ") });
   else e.target.value = panelTask.tags.join(", ");
 });
 
