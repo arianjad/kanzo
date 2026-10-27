@@ -164,6 +164,7 @@ pub struct TaskPatch {
 
 /// What `Store::update_task` did with a patch.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // one per update; boxing would buy nothing
 pub enum Updated {
     Applied(Task),
     /// `fields` of `original` changed since the caller read it, so the patch went to `copy`.
@@ -639,10 +640,7 @@ impl Store {
             let (key, copy_key) = (current.key(), format!("{}#{copy}", current.project));
             let what = fields.join(", ");
             for (task, body) in [
-                (
-                    id,
-                    format!("An edit to {what} conflicted with a change made here since; it was saved as {copy_key}."),
-                ),
+                (id, format!("An edit to {what} made over a change it had not read was saved as {copy_key} instead.")),
                 (copy, format!("Copy of {key}, made because this edit conflicted with a change to {what} there.")),
             ] {
                 c.execute(
