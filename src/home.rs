@@ -136,7 +136,14 @@ impl Home {
             use std::os::unix::fs::MetadataExt;
             fs::metadata(self.db_path()).map(|m| m.ino()).unwrap_or(0)
         }
-        #[cfg(not(unix))]
+        // ponytail: the file index needs unstable std or windows-sys; the last-write time
+        // also moves on every write, which the change counter already does.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            fs::metadata(self.db_path()).map(|m| m.last_write_time()).unwrap_or(0)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             0
         }
