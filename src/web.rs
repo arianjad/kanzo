@@ -412,26 +412,55 @@ struct Patch {
     project: Option<String>,
     tags: Option<String>,
     human: Option<bool>,
+    /// The edited fields as the person saw them when they started editing.
+    base: Option<Base>,
+}
+
+#[derive(Deserialize)]
+struct Base {
+    title: Option<String>,
+    description: Option<String>,
+    status: Option<String>,
+    project: Option<String>,
+    tags: Option<Vec<String>>,
+    human: Option<bool>,
 }
 
 async fn update_task(State(home): Shared, Path(id): Path<i64>, Json(p): Json<Patch>) -> Response {
-    with_store(home, move |_, s| {
-        let project_id = p.project.map(|slug| s.find_project(&slug)).transpose()?.map(|p| p.id);
-        s.update_task(
-            id,
-            TaskPatch {
-                title: p.title,
-                description: p.description,
-                status: p.status,
-                project_id,
-                tags: p.tags,
-                human: p.human,
-            },
-            None,
-        )
-        .map(store::Updated::into_task)
+    with_store(home, move |_, s| patch_task(s, id, p)).await
+}
+
+/// The patched task; or, when the patch went to a copy because a field changed since its
+/// `base`, `{ copy, fields }`. Without `base` the patch always applies.
+fn patch_task(s: &Store, id: i64, p: Patch) -> store::Result<serde_json::Value> {
+    let project_id = p.project.map(|slug| s.find_project(&slug)).transpose()?.map(|p| p.id);
+    let seen = match p.base {
+        Some(b) => {
+            let t = s.get_task(id)?;
+            Some(store::Task {
+                title: b.title.unwrap_or(t.title),
+                description: b.description.unwrap_or(t.description),
+                status: b.status.unwrap_or(t.status),
+                project: b.project.unwrap_or(t.project),
+                tags: b.tags.unwrap_or(t.tags),
+                human: b.human.unwrap_or(t.human),
+                ..t
+            })
+        }
+        None => None,
+    };
+    let patch = TaskPatch {
+        title: p.title,
+        description: p.description,
+        status: p.status,
+        project_id,
+        tags: p.tags,
+        human: p.human,
+    };
+    Ok(match s.update_task(id, patch, seen.as_ref())? {
+        store::Updated::Applied(t) => json!(t),
+        store::Updated::Copied { copy, fields, .. } => json!({ "copy": copy, "fields": fields }),
     })
-    .await
 }
 
 #[derive(Deserialize)]
@@ -691,5 +720,29 @@ mod tests {
         for bad in ["evil.com:4242", "pi.evil.com:4242", "192.168.1.5:80"] {
             assert!(!lan.allows(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_stale_page_edit_goes_to_a_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(&dir.path().join("kanzo.db"), ["todo", "done"].map(String::from).to_vec(), None).unwrap();
+        s.migrate().unwrap();
+        let p = s.create_project("api", "", None).unwrap();
+        let t = s.create_task(p.id, "Fix login", "old").unwrap();
+        let patch = |body: serde_json::Value| patch_task(&s, t.id, serde_json::from_value(body).unwrap()).unwrap();
+        // The page opened the task, then an agent changed the description.
+        s.update_task(t.id, TaskPatch { description: Some("by agent".into()), ..Default::default() }, None).unwrap();
+        let r = patch(json!({ "description": "by me", "base": { "description": "old" } }));
+        assert_eq!(r["fields"], json!(["description"]));
+        assert_eq!((r["copy"]["description"].as_str(), r["copy"]["tags"][0].as_str()), (Some("by me"), Some("conflict")));
+        assert_eq!(s.get_task(t.id).unwrap().description, "by agent");
+        // Seen as it is now, or without a base, the edit applies.
+        let r = patch(json!({ "description": "by me", "base": { "description": "by agent" } }));
+        assert_eq!((r["id"].as_i64(), r["description"].as_str()), (Some(t.id), Some("by me")));
+        // Only edited fields are checked: a stale base for another one is ignored.
+        let r = patch(json!({ "title": "Fix it", "base": { "title": "Fix login", "description": "old" } }));
+        assert_eq!(r["title"], "Fix it");
+        assert_eq!(patch(json!({ "description": "blind" }))["description"], "blind");
+        assert_eq!(s.list_tasks(None, None).unwrap().len(), 2, "one copy");
     }
 }
