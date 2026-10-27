@@ -88,6 +88,7 @@ pub fn install() -> Result<PathBuf, String> {
 }
 
 /// The arguments to start again with: the same ones, without opening another browser tab.
+#[cfg_attr(not(unix), allow(dead_code))] // only `restart` on Unix uses it
 fn restart_args(args: impl Iterator<Item = OsString>) -> Vec<OsString> {
     let mut args: Vec<OsString> = args.collect();
     if !args.iter().any(|a| a == "--no-open") {
