@@ -145,11 +145,20 @@ impl Seen {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).insert(t.id, t.clone());
     }
 
-    /// `saw`, for a task shown as one line, without its description: that stays as last shown.
-    fn saw_line(&self, t: &Task) {
+    /// `saw`, for a reply that showed or wrote the description or the tags only when
+    /// `description` or `tags`: the others stay as last shown.
+    fn saw_some(&self, t: &Task, description: bool, tags: bool) {
         let mut seen = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let description = seen.get(&t.id).map_or_else(|| t.description.clone(), |old| old.description.clone());
-        seen.insert(t.id, Task { description, ..t.clone() });
+        let mut now = t.clone();
+        if let Some(old) = seen.get(&t.id) {
+            if !description {
+                now.description = old.description.clone();
+            }
+            if !tags {
+                now.tags = old.tags.clone();
+            }
+        }
+        seen.insert(t.id, now);
     }
 
     fn get(&self, id: i64) -> Option<Task> {
@@ -377,7 +386,7 @@ impl Kanzo {
                     if t.human {
                         people += 1;
                     } else {
-                        seen.saw_line(t);
+                        seen.saw_some(t, false, true);
                         task_line(&mut out, t);
                         out.push('\n');
                     }
@@ -436,6 +445,7 @@ impl Kanzo {
             .run(move |_, store| {
                 let before = args.id.find(store)?;
                 let status = args.status.map(|s| s.trim().to_ascii_lowercase());
+                let wrote = (args.description.is_some(), args.tags.is_some());
                 let patch = TaskPatch {
                     title: args.title,
                     description: args.description,
@@ -456,7 +466,8 @@ impl Kanzo {
                         ));
                     }
                 };
-                seen.saw(&after);
+                // The reply shows the title and status, not the rest.
+                seen.saw_some(&after, wrote.0, wrote.1);
                 let moved = if before.status != after.status {
                     format!(", {} -> {}", before.status, after.status)
                 } else {
