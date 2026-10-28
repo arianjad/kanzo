@@ -101,6 +101,16 @@ impl Home {
         Ok(home)
     }
 
+    /// The data folder if it already holds a board, read as is: nothing is created or
+    /// migrated. For hooks, which must not set up a board as a side effect.
+    pub fn existing(dir: PathBuf) -> Option<Self> {
+        if !dir.join("kanzo.db").is_file() {
+            return None;
+        }
+        let config = fs::read_to_string(dir.join("config.toml")).ok().and_then(|t| toml::from_str(&t).ok());
+        Some(Self { dir, config: config.unwrap_or_default() })
+    }
+
     pub fn db_path(&self) -> PathBuf {
         self.dir.join("kanzo.db")
     }
@@ -132,8 +142,13 @@ impl Home {
     /// a shared lock on `kanzo.lock`, so sync can wait for it to finish; while
     /// sync holds the lock, this waits up to `LOCK_WAIT` and then reports busy.
     pub fn store(&self) -> store::Result<Store> {
+        self.store_waiting(LOCK_WAIT)
+    }
+
+    /// `store`, waiting at most `wait` for sync.
+    pub fn store_waiting(&self, wait: Duration) -> store::Result<Store> {
         let lock = self.lock_file().map_err(|e| store::Error::Invalid(format!("{e:#}")))?;
-        let deadline = Instant::now() + LOCK_WAIT;
+        let deadline = Instant::now() + wait;
         let lock = loop {
             match lock.try_lock_shared() {
                 Ok(()) => break Some(lock),

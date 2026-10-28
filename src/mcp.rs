@@ -550,42 +550,53 @@ impl ServerHandler for Kanzo {
     }
 }
 
-/// `api#12 [todo] Fix login {bug} (2 comments)`.
 /// Most tasks `prime` lists, so a big board doesn't flood the session.
 const PRIME_LISTED: usize = 40;
+
+/// How long `prime` waits for its input, and for sync; hooks give it a few seconds.
+const PRIME_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// `kanzo prime`: for an agent's SessionStart hook, the open tasks of the project linked
 /// to the session's folder, as hook JSON. Prints nothing for an unlinked folder or on any
 /// error, so a hook never breaks a session.
-pub fn prime(home: &Home) {
+pub fn prime(home: Home) {
     use std::io::{IsTerminal, Read};
-    let mut input = String::new();
-    if !std::io::stdin().is_terminal() {
-        let _ = std::io::stdin().read_to_string(&mut input);
+    let input = if std::io::stdin().is_terminal() {
+        String::new()
+    } else {
+        // A runner that never closes stdin would otherwise hold us until its timeout.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = std::io::stdin().read_to_string(&mut s);
+            let _ = tx.send(s);
+        });
+        rx.recv_timeout(PRIME_WAIT).unwrap_or_default()
+    };
+    if let Some(out) = prime_json(home, &input) {
+        println!("{out}");
     }
-    // The hook's JSON names the session's folder; without it, ours.
-    let cwd = serde_json::from_str::<serde_json::Value>(&input)
-        .ok()
-        .and_then(|v| v["cwd"].as_str().map(PathBuf::from))
-        .or_else(|| std::env::current_dir().ok());
-    let Some(cwd) = cwd else { return };
-    let Ok(Some(text)) = prime_text(home, &cwd) else { return };
-    let out = serde_json::json!({
-        "hookSpecificOutput": { "hookEventName": "SessionStart", "additionalContext": text }
-    });
-    println!("{out}");
 }
 
-fn prime_text(home: &Home, cwd: &std::path::Path) -> store::Result<Option<String>> {
-    let store = home.store()?;
-    let mut project = None;
-    for repo in git_repos(cwd) {
-        if let Some(p) = store.project_by_repo(&repo)? {
-            project = Some(p);
-            break;
-        }
-    }
-    let Some(project) = project else { return Ok(None) };
+/// The hook output for `input`, the hook's JSON, which names the session's folder;
+/// without it, ours.
+fn prime_json(home: Home, input: &str) -> Option<String> {
+    let cwd = serde_json::from_str::<serde_json::Value>(input)
+        .ok()
+        .and_then(|v| v["cwd"].as_str().map(PathBuf::from))
+        .or_else(|| std::env::current_dir().ok())?;
+    let repos = git_repos(&cwd);
+    let ctx = Ctx { home, cwd: Some(cwd), repos };
+    let text = prime_text(&ctx).ok()?;
+    let out =
+        serde_json::json!({ "hookSpecificOutput": { "hookEventName": "SessionStart", "additionalContext": text } });
+    Some(out.to_string())
+}
+
+/// Fails, like the tools, when the folder is linked to no project.
+fn prime_text(ctx: &Ctx) -> store::Result<String> {
+    let store = ctx.home.store_waiting(PRIME_WAIT)?;
+    let project = ctx.project(&store, None)?;
     let (tasks, _) = store.list_tasks_keeping_done(Some(project.id), None, Some(0))?;
     let (people, agents): (Vec<&Task>, Vec<&Task>) = tasks.iter().partition(|t| t.human);
     let slug = &project.slug;
@@ -604,11 +615,14 @@ fn prime_text(home: &Home, cwd: &std::path::Path) -> store::Result<Option<String
         out.pop();
     }
     if !people.is_empty() {
-        let _ = write!(out, "\n({} human tasks left to the user)", people.len());
+        let n = people.len();
+        let tasks = if n == 1 { "task" } else { "tasks" };
+        let _ = write!(out, "\n({n} human {tasks} not shown: for the user, not for agents)");
     }
-    Ok(Some(out))
+    Ok(out)
 }
 
+/// `api#12 [todo] Fix login {bug} (2 comments)`.
 fn task_line(out: &mut String, t: &Task) {
     let _ = write!(out, "{}#{} [{}] {}", t.project, t.id, t.status, t.title);
     write_tags(out, t);
@@ -679,14 +693,20 @@ mod tests {
     #[test]
     fn prime_lists_the_linked_projects_open_tasks() {
         let home_dir = tempfile::tempdir().unwrap();
+        assert!(Home::existing(home_dir.path().to_path_buf()).is_none(), "no board yet");
+        assert!(!home_dir.path().join("config.toml").exists(), "and nothing made");
         let home = Home::open(home_dir.path().to_path_buf()).unwrap();
         let repo = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
             assert!(Command::new("git").arg("-C").arg(repo.path()).args(args).status().unwrap().success())
         };
+        // As a hook sends it: JSON, with the session's folder escaped.
+        let input = serde_json::json!({ "cwd": repo.path(), "hook_event_name": "SessionStart" }).to_string();
+        let prime = || prime_json(Home::existing(home.dir.clone()).unwrap(), &input);
         git(&["init", "--quiet"]);
-        assert_eq!(prime_text(&home, repo.path()).unwrap(), None, "no remote, no output");
+        assert_eq!(prime(), None, "no remote, no output");
         git(&["remote", "add", "origin", "https://github.com/you/api.git"]);
+        assert_eq!(prime(), None, "remote linked to no project, no output");
         let s = home.store().unwrap();
         let p = s.create_project("api", "API", Some("you/api")).unwrap();
         let open = s.create_task(p.id, "open one", "").unwrap();
@@ -696,9 +716,11 @@ mod tests {
             |status: Option<&str>, human| TaskPatch { status: status.map(String::from), human, ..Default::default() };
         s.update_task(done.id, patch(Some("done"), None), None).unwrap();
         s.update_task(mine.id, patch(None, Some(true)), None).unwrap();
-        let text = prime_text(&home, repo.path()).unwrap().unwrap();
+        let out: serde_json::Value = serde_json::from_str(&prime().unwrap()).unwrap();
+        assert_eq!(out["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        let text = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
         assert!(text.contains(&format!("api#{} [todo] open one", open.id)), "{text}");
         assert!(!text.contains("finished") && !text.contains("for a person"), "{text}");
-        assert!(text.contains("1 human tasks"), "{text}");
+        assert!(text.contains("1 human task not shown"), "{text}");
     }
 }

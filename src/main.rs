@@ -113,6 +113,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     if let Some(Command::Update) = cli.command {
         return update_kanzo();
     }
+    // Hooks run this: it must not create or migrate a board, nor ever fail.
+    if let Some(Command::Prime) = cli.command {
+        if let Some(home) = Home::resolve(cli.home).ok().and_then(Home::existing) {
+            mcp::prime(home);
+        }
+        return Ok(());
+    }
     let dir = match &cli.command {
         Some(Command::Init { folder: Some(folder) }) => folder.clone(),
         _ => Home::resolve(cli.home)?,
@@ -121,10 +128,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         None => web::serve(home, cli.port, !cli.no_open).await,
         Some(Command::Mcp) => mcp::serve(home).await,
-        Some(Command::Prime) => {
-            mcp::prime(&home);
-            Ok(())
-        }
+        Some(Command::Prime) => unreachable!("handled above"),
         Some(Command::Init { .. }) => {
             println!("Kanzo data folder ready at {}", home.dir.display());
             Ok(())
