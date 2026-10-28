@@ -745,7 +745,10 @@ mod tests {
         s.update_task(t.id, TaskPatch { description: Some("by agent".into()), ..Default::default() }, None).unwrap();
         let r = patch(json!({ "description": "by me", "base": { "description": "old" } }));
         assert_eq!(r["fields"], json!(["description"]));
-        assert_eq!((r["copy"]["description"].as_str(), r["copy"]["tags"][0].as_str()), (Some("by me"), Some("conflict")));
+        assert_eq!(
+            (r["copy"]["description"].as_str(), r["copy"]["tags"][0].as_str()),
+            (Some("by me"), Some("conflict"))
+        );
         assert_eq!(s.get_task(t.id).unwrap().description, "by agent");
         // Seen as it is now, or without a base, the edit applies.
         let r = patch(json!({ "description": "by me", "base": { "description": "by agent" } }));

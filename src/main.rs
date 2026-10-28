@@ -40,6 +40,8 @@ struct Cli {
 enum Command {
     /// Run the MCP server on stdio (agents launch this, not you)
     Mcp,
+    /// Print this folder's open tasks as SessionStart hook JSON (agent hooks run this)
+    Prime,
     /// Create the data folder; the first run does this too
     Init {
         /// Folder to create [default: the data folder]
@@ -119,6 +121,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         None => web::serve(home, cli.port, !cli.no_open).await,
         Some(Command::Mcp) => mcp::serve(home).await,
+        Some(Command::Prime) => {
+            mcp::prime(&home);
+            Ok(())
+        }
         Some(Command::Init { .. }) => {
             println!("Kanzo data folder ready at {}", home.dir.display());
             Ok(())

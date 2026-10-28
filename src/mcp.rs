@@ -551,6 +551,64 @@ impl ServerHandler for Kanzo {
 }
 
 /// `api#12 [todo] Fix login {bug} (2 comments)`.
+/// Most tasks `prime` lists, so a big board doesn't flood the session.
+const PRIME_LISTED: usize = 40;
+
+/// `kanzo prime`: for an agent's SessionStart hook, the open tasks of the project linked
+/// to the session's folder, as hook JSON. Prints nothing for an unlinked folder or on any
+/// error, so a hook never breaks a session.
+pub fn prime(home: &Home) {
+    use std::io::{IsTerminal, Read};
+    let mut input = String::new();
+    if !std::io::stdin().is_terminal() {
+        let _ = std::io::stdin().read_to_string(&mut input);
+    }
+    // The hook's JSON names the session's folder; without it, ours.
+    let cwd = serde_json::from_str::<serde_json::Value>(&input)
+        .ok()
+        .and_then(|v| v["cwd"].as_str().map(PathBuf::from))
+        .or_else(|| std::env::current_dir().ok());
+    let Some(cwd) = cwd else { return };
+    let Ok(Some(text)) = prime_text(home, &cwd) else { return };
+    let out = serde_json::json!({
+        "hookSpecificOutput": { "hookEventName": "SessionStart", "additionalContext": text }
+    });
+    println!("{out}");
+}
+
+fn prime_text(home: &Home, cwd: &std::path::Path) -> store::Result<Option<String>> {
+    let store = home.store()?;
+    let mut project = None;
+    for repo in git_repos(cwd) {
+        if let Some(p) = store.project_by_repo(&repo)? {
+            project = Some(p);
+            break;
+        }
+    }
+    let Some(project) = project else { return Ok(None) };
+    let (tasks, _) = store.list_tasks_keeping_done(Some(project.id), None, Some(0))?;
+    let (people, agents): (Vec<&Task>, Vec<&Task>) = tasks.iter().partition(|t| t.human);
+    let slug = &project.slug;
+    let mut out = format!("Kanzo board: this repo is project `{slug}`. ");
+    if agents.is_empty() {
+        out.push_str("It has no open tasks for agents.");
+    } else {
+        out.push_str("Open tasks, keep them current with the kanzo tools:\n");
+        for t in agents.iter().take(PRIME_LISTED) {
+            task_line(&mut out, t);
+            out.push('\n');
+        }
+        if agents.len() > PRIME_LISTED {
+            let _ = writeln!(out, "({} more: list_tasks)", agents.len() - PRIME_LISTED);
+        }
+        out.pop();
+    }
+    if !people.is_empty() {
+        let _ = write!(out, "\n({} human tasks left to the user)", people.len());
+    }
+    Ok(Some(out))
+}
+
 fn task_line(out: &mut String, t: &Task) {
     let _ = write!(out, "{}#{} [{}] {}", t.project, t.id, t.status, t.title);
     write_tags(out, t);
@@ -612,4 +670,35 @@ fn task_detail(ctx: &Ctx, store: &Store, t: &Task) -> store::Result<String> {
     }
     out.truncate(out.trim_end().len());
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prime_lists_the_linked_projects_open_tasks() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = Home::open(home_dir.path().to_path_buf()).unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(repo.path()).args(args).status().unwrap().success())
+        };
+        git(&["init", "--quiet"]);
+        assert_eq!(prime_text(&home, repo.path()).unwrap(), None, "no remote, no output");
+        git(&["remote", "add", "origin", "https://github.com/you/api.git"]);
+        let s = home.store().unwrap();
+        let p = s.create_project("api", "API", Some("you/api")).unwrap();
+        let open = s.create_task(p.id, "open one", "").unwrap();
+        let done = s.create_task(p.id, "finished", "").unwrap();
+        let mine = s.create_task(p.id, "for a person", "").unwrap();
+        let patch =
+            |status: Option<&str>, human| TaskPatch { status: status.map(String::from), human, ..Default::default() };
+        s.update_task(done.id, patch(Some("done"), None), None).unwrap();
+        s.update_task(mine.id, patch(None, Some(true)), None).unwrap();
+        let text = prime_text(&home, repo.path()).unwrap().unwrap();
+        assert!(text.contains(&format!("api#{} [todo] open one", open.id)), "{text}");
+        assert!(!text.contains("finished") && !text.contains("for a person"), "{text}");
+        assert!(text.contains("1 human tasks"), "{text}");
+    }
 }
