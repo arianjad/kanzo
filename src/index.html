@@ -105,16 +105,9 @@ aside {
 .update { margin-top: 8px; background: var(--hover); }
 .update:hover, .update:focus-visible { background: var(--active); }
 .update:disabled { opacity: .6; cursor: default; }
-.about { display: flex; align-items: center; gap: 8px; padding: 10px 10px 0; color: var(--faint); font-size: 12px; }
-.about .ghost { width: auto; margin-left: -6px; padding: 2px 6px; font-size: 12px; color: var(--faint); }
-.about .ghost:hover, .about .ghost:focus-visible { color: var(--text); }
-.about .ghost:disabled { cursor: default; }
-#sync-repo { display: inline-flex; align-items: center; gap: 5px; margin: 0 -6px 0 auto; min-width: 0; }
-#sync-repo[hidden] { display: none; }
-#sync-repo-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#sync-repo .icon svg { width: 13px; height: 13px; }
-form.new-project { display: flex; flex-direction: column; gap: 6px; padding: 4px 2px 10px; }
-form.new-project .row { display: flex; gap: 6px; margin-top: 2px; }
+#settings { margin-top: 8px; color: var(--muted); }
+#settings:hover, #settings:focus-visible, #settings.open { color: var(--text); }
+.menu .value { margin-left: auto; padding-left: 12px; color: var(--faint); font-size: 12px; }
 
 /* Controls */
 input.field, textarea.field, select.field {
@@ -148,6 +141,8 @@ header .repo-link {
 }
 header .repo-link:hover, header .repo-link:focus-visible { background: var(--active); color: var(--text); }
 header .repo-link .icon svg { width: 14px; height: 14px; }
+#new-task { display: inline-flex; align-items: center; gap: 6px; padding-left: 12px; }
+#new-task .icon svg { width: 16px; height: 16px; }
 .columns {
   flex: 1; min-height: 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(260px, 1fr);
   gap: 12px; padding: 0 24px 24px; overflow-x: auto;
@@ -167,7 +162,7 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
   background: none; color: var(--faint);
 }
 .column h2 .collapse:hover, .column h2 .collapse:focus-visible { background: var(--hover); color: var(--text); }
-/* A collapsed done column: a thin strip, name written downwards, that expands on a click. */
+/* A collapsed column: a thin strip, name written downwards, that expands on a click. */
 .column.collapsed { cursor: pointer; }
 .column.collapsed:hover { background: var(--hover); }
 .column.collapsed h2 { writing-mode: vertical-rl; padding: 12px 0; align-items: center; gap: 10px; }
@@ -216,11 +211,6 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
 }
 .tag .dot { width: 6px; height: 6px; }
 .drop-line { height: 2px; background: var(--text); border-radius: 2px; margin: -4px 4px; }
-.column h2 .add {
-  margin: -6px -6px -6px auto; width: 30px; height: 30px; padding: 6px; border: 0; border-radius: 8px;
-  background: none; color: var(--muted);
-}
-.column h2 .add:hover, .column h2 .add:focus-visible { background: var(--hover); color: var(--text); }
 .empty {
   margin: auto; text-align: center; color: var(--muted); max-width: 380px; padding: 40px 20px;
 }
@@ -255,6 +245,7 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
   width: calc(100% + 20px); resize: none; overflow: hidden; display: block;
 }
 .panel .inline:hover, .panel .inline:focus { background: var(--hover); }
+.panel .desc-view { cursor: text; }
 .panel .title-input { font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
 .props { display: grid; grid-template-columns: 96px 1fr; gap: 8px 12px; align-items: center; color: var(--muted); }
 .props select { width: auto; padding: 4px 30px 4px 12px; border-radius: 99px; text-transform: capitalize; }
@@ -337,17 +328,38 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
 .search-field input { flex: 1; min-width: 0; border: 0; background: none; font-size: 16px; }
 .search-field input::-webkit-search-cancel-button { display: none; }
 .results { overflow-y: auto; padding: 6px; }
-.sync-window {
+.dialog-window {
   width: min(520px, 100%); display: flex; flex-direction: column; gap: 12px; padding: 22px 22px 18px;
-  background: var(--menu); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow);
+  background: var(--panel); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow);
 }
-.sync-window h2 { margin: 0; font-size: 17px; font-weight: 600; }
-.sync-window p { margin: 0; color: var(--muted); line-height: 1.45; }
-.sync-window .error { color: var(--danger); white-space: pre-line; font-size: 13px; }
-.sync-window .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
-.sync-window .row a { margin-right: auto; color: var(--muted); font-size: 13px; }
-.sync-window .row a:hover { color: var(--text); }
-.sync-window .btn:disabled { opacity: .6; cursor: default; }
+.dialog-window h2 { margin: 0; font-size: 17px; font-weight: 600; }
+.dialog-window p { margin: 0; color: var(--muted); line-height: 1.45; }
+.dialog-window .row { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+/* The settings window, as in Claude's: categories on the left, their settings on the right. */
+.settings-window {
+  width: min(760px, 100%); height: min(460px, 76vh); display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow);
+}
+.settings-head { display: flex; align-items: center; padding: 12px 14px 12px 22px; border-bottom: 1px solid var(--border); }
+.settings-head h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.settings-head .ghost { width: auto; margin-left: auto; padding: 6px; color: var(--muted); }
+.settings-head .ghost:hover, .settings-head .ghost:focus-visible { color: var(--text); }
+.settings-body { display: grid; grid-template-columns: 190px minmax(0, 1fr); min-height: 0; }
+#settings-nav { display: flex; flex-direction: column; gap: 2px; padding: 12px; background: var(--sidebar); border-right: 1px solid var(--border); }
+#settings-nav .active { background: var(--active); }
+.settings-pane { display: flex; flex-direction: column; gap: 12px; padding: 18px 22px; overflow-y: auto; }
+.settings-pane h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.settings-pane p { margin: 0; color: var(--muted); line-height: 1.45; }
+.settings-pane .error { color: var(--danger); white-space: pre-line; font-size: 13px; }
+.settings-pane .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.settings-pane .row a { color: var(--muted); font-size: 13px; }
+.settings-pane .row a:hover { color: var(--text); }
+.settings-pane .row .btn { margin-left: auto; }
+.settings-pane .btn:disabled { opacity: .6; cursor: default; }
+.setting { display: flex; align-items: center; gap: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
+.setting .text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.setting .text span { color: var(--muted); font-size: 13px; }
+label.setting { cursor: pointer; }
 .results .label { color: var(--faint); font-size: 12px; padding: 8px 12px 4px; }
 .results .note { color: var(--faint); padding: 14px 12px; }
 .result {
@@ -373,8 +385,10 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
   .nav { flex-direction: row; overflow-x: auto; }
   .nav a { width: auto; }
   .nav .label { display: none; }
-  #new-project-toggle, form.new-project, .about { display: none; }
+  #new-project-toggle { display: none; }
   .columns { grid-auto-columns: minmax(78vw, 1fr); padding: 0 12px 12px; }
+  .settings-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  #settings-nav { flex-direction: row; border-right: 0; border-bottom: 1px solid var(--border); }
   header { padding: 12px; }
 }
 </style>
@@ -384,30 +398,18 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
   <div class="brand">
     <img src="/logo.png" alt="">
     Kanzo
-    <button class="ghost" id="sync" title="Sync with your other machines" aria-label="Sync"><span class="icon" data-icon="sync"></span></button>
     <button class="ghost" id="search-open" title="Search (/ or ⌘K)" aria-label="Search tasks"><span class="icon" data-icon="search"></span></button>
   </div>
   <button class="ghost" id="new-project-toggle"><span class="icon" data-icon="newProject"></span>New project</button>
-  <form class="new-project" id="new-project" hidden>
-    <input class="field" name="slug" placeholder="slug, e.g. api" required autocomplete="off" pattern="[a-zA-Z0-9][a-zA-Z0-9\-]{0,31}" title="Letters, digits and -, up to 32">
-    <input class="field" name="name" placeholder="Name (optional)" autocomplete="off">
-    <input class="field" name="repo" placeholder="GitHub owner/repo (optional)" autocomplete="off">
-    <div class="row">
-      <button class="btn primary" type="submit">Create</button>
-      <button class="btn" type="button" id="new-project-cancel">Cancel</button>
-    </div>
-  </form>
   <nav class="nav" id="nav"></nav>
   <button class="ghost update" id="update" hidden><span class="icon" data-icon="update"></span><span id="update-label"></span></button>
-  <div class="about">
-    <button class="ghost" id="version" title="Check for updates"></button>
-    <button class="ghost" id="sync-repo" hidden><span class="icon" data-icon="sync"></span><span id="sync-repo-name"></span></button>
-  </div>
+  <button class="ghost" id="settings" aria-haspopup="menu"><span class="icon" data-icon="settings"></span>Settings</button>
 </aside>
 
 <main>
   <header>
     <div class="info" id="header"></div>
+    <button class="btn primary" id="new-task" title="New task (n)" hidden><span class="icon" data-icon="plus"></span>New task</button>
   </header>
   <div class="columns" id="columns"></div>
 </main>
@@ -432,6 +434,7 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
     <div class="section">
       <h3>Description</h3>
       <textarea class="inline desc-input" id="p-desc" rows="1" placeholder="Add a description (Markdown)"></textarea>
+      <div class="inline md desc-view" id="p-desc-view" tabindex="0" role="button" aria-label="Edit description" hidden></div>
       <div class="thumbs" id="p-images"></div>
     </div>
     <div class="section">
@@ -446,16 +449,55 @@ header .repo-link .icon svg { width: 14px; height: 14px; }
   </div>
 </div>
 
-<div class="search-dialog" id="sync-dialog" hidden>
-  <form class="sync-window" id="sync-form" role="dialog" aria-labelledby="sync-title">
-    <h2 id="sync-title">Sync your board</h2>
-    <p>Keep this board the same on all your machines through a private git repo you own. Use the same repo on each machine.</p>
-    <input class="field" id="sync-url" placeholder="https://github.com/you/kanzo-data" autocomplete="off" spellcheck="false" aria-label="Repository URL">
-    <p class="error" id="sync-error" hidden></p>
+<div class="search-dialog" id="settings-dialog" hidden>
+  <div class="settings-window" role="dialog" aria-labelledby="settings-title">
+    <div class="settings-head">
+      <h2 id="settings-title">Settings</h2>
+      <button class="ghost" id="settings-close" title="Close (Esc)" aria-label="Close"><span class="icon" data-icon="close"></span></button>
+    </div>
+    <div class="settings-body">
+      <nav id="settings-nav">
+        <button class="ghost" data-section="board"><span class="icon" data-icon="board"></span>Board</button>
+        <button class="ghost" data-section="sync"><span class="icon" data-icon="sync"></span>Sync</button>
+        <button class="ghost" data-section="about"><span class="icon" data-icon="info"></span>About</button>
+      </nav>
+      <section class="settings-pane" data-section="board">
+        <h3>Board</h3>
+        <label class="setting">
+          <span class="text">Backlog column<span>A column before todo, for tasks agents leave alone</span></span>
+          <span class="switch"><input type="checkbox" id="settings-backlog" aria-label="Backlog column"><span></span></span>
+        </label>
+      </section>
+      <form class="settings-pane" data-section="sync" id="sync-form">
+        <h3>Sync</h3>
+        <p>Keep this board the same on all your machines through a private git repo you own. Use the same repo on each machine.</p>
+        <input class="field" id="sync-url" placeholder="https://github.com/you/kanzo-data" autocomplete="off" spellcheck="false" aria-label="Repository URL">
+        <p class="error" id="sync-error" hidden></p>
+        <div class="row">
+          <a id="sync-create" href="https://github.com/new?name=kanzo-data&amp;visibility=private" target="_blank" rel="noopener">Create a private repo on GitHub</a>
+          <button class="btn primary" type="submit" id="sync-save">Save and sync</button>
+        </div>
+      </form>
+      <section class="settings-pane" data-section="about">
+        <h3>About</h3>
+        <div class="setting">
+          <span class="text">Version<span id="settings-version"></span></span>
+          <button class="btn" id="settings-update">Check for updates</button>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+<div class="search-dialog" id="project-dialog" hidden>
+  <form class="dialog-window" id="new-project" role="dialog" aria-labelledby="project-title">
+    <h2 id="project-title">New project</h2>
+    <p>The slug starts each task's key, like api#12.</p>
+    <input class="field" name="slug" placeholder="Slug, like api" aria-label="Slug" required autocomplete="off" spellcheck="false" pattern="[a-zA-Z0-9][a-zA-Z0-9\-]{0,31}" title="Letters, digits and -, up to 32">
+    <input class="field" name="name" placeholder="Name (optional)" aria-label="Name" autocomplete="off">
+    <input class="field" name="repo" placeholder="GitHub owner/repo (optional)" aria-label="GitHub repo" autocomplete="off" spellcheck="false">
     <div class="row">
-      <a id="sync-create" href="https://github.com/new?name=kanzo-data&amp;visibility=private" target="_blank" rel="noopener">Create a private repo on GitHub</a>
-      <button class="btn" type="button" id="sync-cancel">Cancel</button>
-      <button class="btn primary" type="submit" id="sync-save">Save and sync</button>
+      <button class="btn" type="button" id="new-project-cancel">Cancel</button>
+      <button class="btn primary" type="submit">Create</button>
     </div>
   </form>
 </div>

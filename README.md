@@ -24,7 +24,7 @@ Kanzo is a kanban board in your browser and an MCP server in one small program, 
 curl -LsSf https://github.com/emanuele-em/kanzo/releases/latest/download/kanzo-installer.sh | sh
 ```
 
-For macOS and Linux, including every Raspberry Pi. Or with Cargo:
+For macOS and Linux, including every Raspberry Pi. Every release is signed by GitHub: check a download with `gh attestation verify <file> --repo emanuele-em/kanzo`. Or with Cargo:
 
 ```sh
 cargo install kanzo
@@ -46,6 +46,8 @@ cargo install kanzo
 Every command takes `--home <dir>` to use another data folder.
 
 `n` adds a task, `/` or `⌘K` searches every project, `Tab` moves to the description, `⌘↵` saves and closes, `Esc` cancels.
+
+Need somewhere to park ideas? Turn on the Backlog column in Settings, at the bottom of the sidebar: agents leave its tasks alone until you move them to `todo`.
 
 Paste or drop an image into a task or a comment to attach it, as in ChatGPT. Agents get its file path and can open it.
 
@@ -72,10 +74,12 @@ Then ask: *"take the next task from kanzo and do it."* The agent moves the card 
 A laptop, a desktop, a Raspberry Pi: they all share one board through a private git repo you own.
 
 1. [Create an empty private repo](https://github.com/new?name=kanzo-data&visibility=private) on GitHub, or anywhere git can push.
-2. Press the sync button in the sidebar and paste its URL. Kanzo makes `~/kanzo` a git repo and pushes the board.
+2. Click Settings at the bottom of the sidebar, choose Sync and paste its URL. Kanzo makes `~/kanzo` a git repo and pushes the board.
 3. On each other machine, do the same with the same URL: Kanzo offers to use the board that's already there.
 
-From then on, press sync, or run `kanzo sync`, when you switch machines. It commits the board and pulls or pushes it, and it's safe while the board and your agents are running. If both machines changed the board, Kanzo asks which one to keep. To move to another repo, click its name at the bottom of the sidebar.
+From then on, choose Sync, or run `kanzo sync`, when you switch machines. It commits the board and pulls or pushes it, and it's safe while the board and your agents are running. If both machines changed the board, Kanzo asks which one to keep. To move to another repo, change it in Settings, under Sync.
+
+Sync is for switching machines: work on one, sync, then move to the other. For agents on several machines at once, run one board with `listen = "0.0.0.0"` on a network you trust, and point every agent at `http://<host>:4242/mcp`, passing the project by name.
 
 ## Settings
 
@@ -84,7 +88,6 @@ Everything lives in `~/kanzo`: the board in `kanzo.db`, settings in `config.toml
 ```toml
 port = 4242
 listen = "127.0.0.1"   # "0.0.0.0" opens the board to your network: no logins, so only on one you trust
-statuses = ["todo", "doing", "review", "done"]   # new tasks go first, the last counts as done
 mcp_http = true        # MCP at /mcp
 ```
 

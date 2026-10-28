@@ -26,6 +26,10 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
+# Sign each release's files with a GitHub build attestation, for `gh attestation verify`
+github-attestations = true
+# After every file is built, so the installer and sha256.sum are signed too
+github-attestations-phase = "host"
 # Also publish each release to crates.io, for `cargo install kanzo`
 publish-jobs = ["./publish-crates"]
 

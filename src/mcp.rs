@@ -24,13 +24,15 @@ use crate::store::{self, Error, Project, Store, Task, TaskPatch, Updated, short_
 /// The most done tasks list_tasks shows, newest first: an old board has thousands.
 const DONE_LISTED: usize = 20;
 
-const INSTRUCTIONS: &str = "The user's kanban board, for all their projects. Tasks look like api#12. \
-Without `project`, Kanzo uses the project linked to this folder's GitHub repo. A good loop: next_task, \
-add_comment with what you did, then update_task to review. Leave tasks marked human to the user.";
+const INSTRUCTIONS: &str = "The user's kanban board, on this machine, for all their projects. Tasks look like \
+api#12. Without `project`, Kanzo uses the project linked to this folder's GitHub repo. Keep it current unasked: \
+doing when you start a task, comments on what you did, review when you finish or get stuck. Leave done and \
+human tasks to the user.";
 
-const HTTP_INSTRUCTIONS: &str = "The user's kanban board, for all their projects. Tasks look like api#12. \
-Over HTTP Kanzo can't see your folder, so pass `project` (see list_projects). A good loop: next_task, \
-add_comment with what you did, then update_task to review. Leave tasks marked human to the user.";
+const HTTP_INSTRUCTIONS: &str = "The user's kanban board, on their machine, for all their projects. Tasks look \
+like api#12. Over HTTP Kanzo can't see your folder, so pass `project` (see list_projects). Keep it current \
+unasked: doing when you start a task, comments on what you did, review when you finish or get stuck. Leave \
+done and human tasks to the user.";
 
 /// `kanzo mcp`: one agent on stdin and stdout, in the folder it started us in.
 pub async fn serve(home: Home) -> Result<()> {
@@ -217,6 +219,8 @@ struct CreateTaskArgs {
     project: Option<String>,
     /// Comma-separated.
     tags: Option<String>,
+    /// Column; defaults to todo.
+    status: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -422,13 +426,15 @@ impl Kanzo {
             .await)
     }
 
-    #[tool(description = "Add a task to todo.")]
+    #[tool(description = "Add a task, to todo unless you pass status.")]
     async fn create_task(&self, Parameters(args): Parameters<CreateTaskArgs>) -> Result<CallToolResult, ErrorData> {
         let seen = self.seen.clone();
         Ok(self
             .run(move |ctx, store| {
                 let project = ctx.project(store, args.project.as_deref())?;
-                let mut t = store.create_task(project.id, &args.title, args.description.as_deref().unwrap_or(""))?;
+                let status = args.status.map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty());
+                let description = args.description.as_deref().unwrap_or("");
+                let mut t = store.create_task_in(project.id, status.as_deref(), &args.title, description)?;
                 if args.tags.is_some() {
                     t = store.update_task(t.id, TaskPatch { tags: args.tags, ..Default::default() }, None)?.into_task();
                 }
@@ -509,7 +515,7 @@ impl Kanzo {
                     }
                     None => {
                         let scope = project.map_or("any project".into(), |p| p.slug);
-                        Ok(format!("Nothing in {} for {scope}.", store.statuses()[0]))
+                        Ok(format!("Nothing in todo for {scope}."))
                     }
                 }
             })

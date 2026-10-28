@@ -56,6 +56,10 @@ pub fn newer(version: &str) -> bool {
 /// Runs the latest release's installer over this program and returns its path,
 /// ready to restart.
 pub fn install() -> Result<PathBuf, String> {
+    // ponytail: releases ship no Windows build; the banner still says when one is out.
+    if cfg!(windows) {
+        return Err("There's no Windows release to install: build the new version from source".into());
+    }
     let exe = std::env::current_exe().and_then(|p| p.canonicalize()).map_err(|e| e.to_string())?;
     // The installer writes to <dir>/bin, so it can only replace a program kept in a bin folder.
     let dir = match exe.parent() {

@@ -650,12 +650,13 @@ dependencies = [
 
 [[package]]
 name = "kanzo"
-version = "0.1.3"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
  "clap",
  "dirs",
+ "libc",
  "rmcp",
  "rusqlite",
  "schemars",

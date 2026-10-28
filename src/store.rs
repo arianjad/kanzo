@@ -184,6 +184,13 @@ impl Updated {
     }
 }
 
+/// The board's columns, left to right. New tasks go in todo, agents take theirs from
+/// there and move them to doing, and tasks in done count as done.
+const STATUSES: [&str; 4] = ["todo", "doing", "review", "done"];
+
+/// An optional column before todo, for tasks that agents leave alone.
+pub const BACKLOG: &str = "backlog";
+
 pub struct Store {
     conn: Connection,
     statuses: Vec<String>,
@@ -193,7 +200,7 @@ pub struct Store {
 
 impl Store {
     /// Opens the database. `lock` is kept until the store is dropped (see `Home::store`).
-    pub fn open(path: &Path, statuses: Vec<String>, lock: Option<std::fs::File>) -> Result<Self> {
+    pub fn open(path: &Path, lock: Option<std::fs::File>) -> Result<Self> {
         let conn = Connection::open(path)?;
         // The board and any number of agents share this file; wait instead of failing.
         conn.busy_timeout(Duration::from_secs(5))?;
@@ -203,6 +210,11 @@ impl Store {
         // when a board loses power.
         conn.pragma_update_and_check(None, "journal_mode", "TRUNCATE", |_| Ok(()))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Before the first migration there is no meta table, and so no backlog.
+        let backlog = conn
+            .query_row("SELECT value FROM meta WHERE key = 'backlog'", [], |r| r.get::<_, String>(0))
+            .is_ok_and(|v| v == "1");
+        let statuses = backlog.then_some(BACKLOG).into_iter().chain(STATUSES).map(String::from).collect();
         Ok(Self { conn, statuses, _lock: lock })
     }
 
@@ -210,12 +222,27 @@ impl Store {
         &self.statuses
     }
 
-    fn first_status(&self) -> &str {
-        &self.statuses[0]
+    fn done_status(&self) -> &str {
+        STATUSES[3]
     }
 
-    fn done_status(&self) -> &str {
-        self.statuses.last().expect("config has at least two statuses")
+    /// Shows or hides the backlog column. It must be empty to hide it, or its
+    /// tasks would vanish from the board.
+    pub fn set_backlog(&self, on: bool) -> Result<()> {
+        self.write(|c| {
+            let left: i64 = c.query_row("SELECT count(*) FROM tasks WHERE status = ?1", [BACKLOG], |r| r.get(0))?;
+            if !on && left > 0 {
+                let tasks = if left == 1 { "task" } else { "tasks" };
+                return Err(Error::Invalid(format!("move the {left} {tasks} out of backlog first")));
+            }
+            c.execute(
+                "INSERT INTO meta (key, value) VALUES ('backlog', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [if on { "1" } else { "0" }],
+            )?;
+            // Other open boards redraw their columns.
+            c.execute("UPDATE meta SET value = value + 1 WHERE key = 'changes'", [])?;
+            Ok(())
+        })
     }
 
     /// Runs `f` in an immediate transaction, so concurrent writers queue up
@@ -514,7 +541,7 @@ impl Store {
         let mut tasks: Vec<Task> = stmt
             .query_map(params![project_id, status, done, limit], Self::task_row)?
             .collect::<rusqlite::Result<_>>()?;
-        let column = |t: &Task| self.statuses.iter().position(|s| *s == t.status).unwrap_or(usize::MAX);
+        let column = |t: &Task| self.statuses().iter().position(|s| *s == t.status).unwrap_or(usize::MAX);
         tasks.sort_by_key(column);
         let hidden = match keep_done {
             Some(keep) if status.is_none_or(|s| s == done) => {
@@ -576,10 +603,10 @@ impl Store {
     }
 
     fn check_status(&self, status: &str) -> Result<()> {
-        if self.statuses.iter().any(|s| s == status) {
+        if self.statuses().iter().any(|s| s == status) {
             Ok(())
         } else {
-            Err(Error::Invalid(format!("unknown status {status:?}; use one of: {}", self.statuses.join(", "))))
+            Err(Error::Invalid(format!("unknown status {status:?}; use one of: {}", self.statuses().join(", "))))
         }
     }
 
@@ -592,9 +619,23 @@ impl Store {
         Ok(max.map_or(1.0, |m| m.floor() + 1.0))
     }
 
+    /// Adds a task at the bottom of todo; a shorthand for tests.
+    #[cfg(test)]
     pub fn create_task(&self, project_id: i64, title: &str, description: &str) -> Result<Task> {
+        self.create_task_in(project_id, None, title, description)
+    }
+
+    /// Adds a task at the bottom of `status`, todo when left out.
+    pub fn create_task_in(
+        &self,
+        project_id: i64,
+        status: Option<&str>,
+        title: &str,
+        description: &str,
+    ) -> Result<Task> {
         let title = clean_title(title)?;
-        let status = self.first_status();
+        let status = status.unwrap_or(STATUSES[0]);
+        self.check_status(status)?;
         let id = self.write(|c| {
             let position = Self::end_of_column(c, status, 0)?;
             c.execute(
@@ -791,11 +832,10 @@ impl Store {
         Ok(())
     }
 
-    /// Takes the top task of the first column that isn't for a person, and moves it to
-    /// the bottom of the second.
+    /// Takes the top task of todo that isn't for a person, and moves it to the bottom
+    /// of doing.
     pub fn next_task(&self, project_id: Option<i64>) -> Result<Option<Task>> {
-        let from = self.first_status();
-        let to = &self.statuses[1];
+        let [from, to, ..] = STATUSES;
         let id = self.write(|c| {
             let id: Option<i64> = c
                 .query_row(
@@ -1066,8 +1106,7 @@ mod tests {
 
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
-        let statuses = ["todo", "doing", "review", "done"].map(String::from).to_vec();
-        let store = Store::open(&dir.path().join("kanzo.db"), statuses, None).unwrap();
+        let store = Store::open(&dir.path().join("kanzo.db"), None).unwrap();
         store.migrate().unwrap();
         (dir, store)
     }
@@ -1235,8 +1274,7 @@ mod tests {
             )
             .unwrap();
         }
-        let statuses = ["todo", "doing", "review", "done"].map(String::from).to_vec();
-        let s = Store::open(&path, statuses, None).unwrap();
+        let s = Store::open(&path, None).unwrap();
         s.migrate().unwrap();
         assert_eq!(s.find_project("api").unwrap().repos, ["me/api"]);
         assert!(s.find_project("web").unwrap().repos.is_empty());
@@ -1439,6 +1477,30 @@ mod tests {
         assert_eq!(s.next_task(Some(api.id)).unwrap().unwrap().title, "api second");
         assert!(s.next_task(Some(api.id)).unwrap().is_none());
         assert_eq!(s.get_task(human.id).unwrap().status, "todo");
+    }
+
+    #[test]
+    fn backlog_is_a_column_agents_skip() {
+        let (dir, s) = store();
+        assert_eq!(s.statuses(), STATUSES);
+        s.set_backlog(true).unwrap();
+        let s = Store::open(&dir.path().join("kanzo.db"), None).unwrap();
+        assert_eq!(s.statuses(), ["backlog", "todo", "doing", "review", "done"]);
+        let api = s.create_project("api", "", None).unwrap();
+        let backlog = s.create_task_in(api.id, Some("backlog"), "later", "").unwrap();
+        assert_eq!(backlog.status, "backlog");
+        assert!(s.create_task_in(api.id, Some("nope"), "x", "").is_err());
+        assert_eq!(s.create_task(api.id, "now", "").unwrap().status, "todo");
+
+        let t = s.next_task(None).unwrap().unwrap();
+        assert_eq!((t.title.as_str(), t.status.as_str()), ("now", "doing"));
+        assert!(s.next_task(None).unwrap().is_none());
+        assert_eq!(s.get_task(backlog.id).unwrap().status, "backlog");
+
+        // Hiding it would hide its tasks.
+        assert!(s.set_backlog(false).is_err());
+        s.delete_task(backlog.id).unwrap();
+        s.set_backlog(false).unwrap();
     }
 
     #[test]

@@ -1,0 +1,56 @@
+# Posts resources.yml's numbers on the pull request, as one comment it updates on
+# every push. It runs main's report script, never the PR's code, so it can hold the
+# token to comment and the Anthropic key that counts tokens, even for PRs from forks.
+name: Resources comment
+
+on:
+  workflow_run:
+    workflows: [Resources]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+jobs:
+  comment:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: resources
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/resources
+      # Ubuntu's own Python takes no packages outside a virtual environment.
+      - run: python3 -m venv "$RUNNER_TEMP/venv" && "$RUNNER_TEMP/venv/bin/pip" install --quiet anthropic==2.3.0
+      - run: >
+          "$RUNNER_TEMP/venv/bin/python" .github/resources/report.py
+          "$RUNNER_TEMP/resources/resources.json" > "$RUNNER_TEMP/comment.md"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # The PR number comes from the PR's own run, so it only counts if that PR's
+      # head is the commit that was measured.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          pr=$(jq -r '.pr' "$RUNNER_TEMP/resources/resources.json")
+          [[ "$pr" =~ ^[0-9]+$ ]] || { echo "no PR number in the results"; exit 1; }
+          if [ "$(gh api "repos/$REPO/pulls/$pr" --jq .head.sha)" != "$HEAD_SHA" ]; then
+            echo "PR #$pr has moved on from $HEAD_SHA; its next run will comment"
+            exit 0
+          fi
+          id=$(gh api "repos/$REPO/issues/$pr/comments" --paginate \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- kanzo-resources -->"))) | .id' | head -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$RUNNER_TEMP/comment.md" > /dev/null
+          else
+            gh api "repos/$REPO/issues/$pr/comments" -F body=@"$RUNNER_TEMP/comment.md" > /dev/null
+          fi

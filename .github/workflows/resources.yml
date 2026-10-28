@@ -1,0 +1,41 @@
+# Measures what a pull request does to Kanzo's size, memory, speed and agents'
+# tokens: it builds main and the PR merged into main, and runs both side by side.
+# resources-comment.yml posts the numbers on the PR. This half runs the PR's code,
+# so it gets no secrets and can't write to the repo.
+name: Resources
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: resources-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    runs-on: ubuntu-26.04
+    steps:
+      # The PR merged into main, and its first parent: main as it is now.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - run: git worktree add ../main HEAD^1
+      - run: rustup update stable --no-self-update && rustup default stable
+      # Each from its own folder, so each reads its own .cargo/config.toml.
+      - run: cargo build --release --locked
+      - run: cargo build --release --locked
+        working-directory: ../main
+      - run: >
+          python3 .github/resources/measure.py
+          --base ../main/target/release/kanzo ../main/Cargo.lock
+          --head target/release/kanzo Cargo.lock
+          --pr ${{ github.event.pull_request.number }}
+          > resources.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: resources
+          path: resources.json

@@ -140,6 +140,7 @@ fn router(home: Home, guard: Guard, shutdown: CancellationToken) -> Router {
         .route("/api/tasks/{id}/images", post(attach_image))
         .route("/api/update", get(update_status).post(update_now))
         .route("/api/sync", get(sync_status).post(sync_now).put(sync_repo))
+        .route("/api/settings", patch(update_settings))
         .layer(middleware::from_fn_with_state(Arc::new(guard), protect))
         .with_state(Arc::new(home))
 }
@@ -385,9 +386,19 @@ struct NewTask {
 async fn create_task(State(home): Shared, Json(t): Json<NewTask>) -> Response {
     with_store(home, move |_, s| {
         let project = s.find_project(&t.project)?;
-        s.create_task(project.id, &t.title, &t.description)
+        s.create_task_in(project.id, None, &t.title, &t.description)
     })
     .await
+}
+
+/// Board settings, kept in kanzo.db so they sync with the board.
+#[derive(Deserialize)]
+struct Settings {
+    backlog: bool,
+}
+
+async fn update_settings(State(home): Shared, Json(r): Json<Settings>) -> Response {
+    with_store(home, move |_, s| s.set_backlog(r.backlog)).await
 }
 
 #[derive(Serialize)]
@@ -725,7 +736,7 @@ mod tests {
     #[test]
     fn a_stale_page_edit_goes_to_a_copy() {
         let dir = tempfile::tempdir().unwrap();
-        let s = Store::open(&dir.path().join("kanzo.db"), ["todo", "done"].map(String::from).to_vec(), None).unwrap();
+        let s = Store::open(&dir.path().join("kanzo.db"), None).unwrap();
         s.migrate().unwrap();
         let p = s.create_project("api", "", None).unwrap();
         let t = s.create_task(p.id, "Fix login", "old").unwrap();

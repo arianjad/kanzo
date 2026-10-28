@@ -27,7 +27,7 @@ For a change to the board, also try it in a browser, in light and dark mode.
 
 ## What a good change looks like
 
-- **Light.** No new dependency without a strong reason. If it could cost speed or memory, measure before and after.
+- **Light.** No new dependency without a strong reason. If it could cost speed or memory, measure before and after: CI comments on every pull request with what it changes in size, memory, speed and agents' tokens, and `python3 .github/resources/measure.py --help` runs the same measurements on your machine.
 - **Few tokens.** MCP replies stay short plain text; say what a change does to their size.
 - **Plain web.** The board is HTML, CSS and JavaScript with no build step, and runs on Safari 13.1, Chrome 80 and Firefox 78.
 - **Small commits.** One change per commit, with a short imperative subject and a body that says why.
